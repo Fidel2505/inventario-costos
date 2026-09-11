@@ -326,6 +326,69 @@ else:
     st.info("No se encontraron resultados. Prueba con otro SKU o descripción.")
 
 
+# --- Calculadora de margen de ganancia ---
+st.divider()
+st.subheader("🧮 Calculadora de margen de ganancia")
+
+col1, col2 = st.columns(2)
+with col1:
+    sku_margen = st.text_input("SKU", key="sku_margen", placeholder="Ej. 2001")
+with col2:
+    precio_venta = st.number_input("Precio al que se quiere vender ($)", min_value=0.0, step=0.5, format="%.2f")
+
+if sku_margen.strip():
+    try:
+        sku_int = int(float(sku_margen))
+        conn = get_conn()
+        try:
+            info = _info_sku(conn, sku_int)
+        finally:
+            conn.close()
+
+        if info["Fuente"] == "Sin datos":
+            st.warning("Ese SKU no está en los datos cargados.")
+        else:
+            st.caption(f"**{info['Nombre']}**")
+
+            filas = []
+            for etiqueta, costo in [
+                ("Costo de Lista", info["Costo Lista"]),
+                ("Costo Ponderado (Existencia actual)", info["Costo Vivo Ponderado (Existencia)"]),
+                ("Costo Ponderado Histórico", info["Costo Ponderado Histórico"]),
+            ]:
+                if costo and precio_venta > 0:
+                    ganancia = precio_venta - costo
+                    margen_venta = ganancia / precio_venta * 100      # % sobre el precio de venta
+                    margen_costo = ganancia / costo * 100             # % sobre el costo (markup)
+                    filas.append({
+                        "Referencia de Costo": etiqueta,
+                        "Costo": f"${costo:,.2f}",
+                        "Ganancia/Pérdida $": f"${ganancia:,.2f}",
+                        "Margen % (sobre venta)": f"{margen_venta:,.1f}%",
+                        "Margen % (sobre costo)": f"{margen_costo:,.1f}%",
+                    })
+                else:
+                    filas.append({
+                        "Referencia de Costo": etiqueta,
+                        "Costo": f"${costo:,.2f}" if costo else "Sin dato",
+                        "Ganancia/Pérdida $": "",
+                        "Margen % (sobre venta)": "",
+                        "Margen % (sobre costo)": "",
+                    })
+
+            st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+
+            if precio_venta <= 0:
+                st.info("Escribe un precio de venta arriba para calcular el margen.")
+            else:
+                st.caption(
+                    "**Margen sobre venta** = ganancia ÷ precio de venta (lo que suele pedir un estado de resultados). "
+                    "**Margen sobre costo** = ganancia ÷ costo (cuánto se le sube al costo, o 'markup')."
+                )
+    except ValueError:
+        st.warning("Escribe un SKU válido (solo números).")
+
+
 # ====================================================================
 # CÓMO PUBLICAR ESTA APP GRATIS (Streamlit Community Cloud)
 # ====================================================================
