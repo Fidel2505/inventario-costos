@@ -362,8 +362,12 @@ with tab_cotizador:
     )
 
     if "pedido_df" not in st.session_state:
+        # Las 3 columnas se guardan como float (no int) a propósito: un entero no
+        # puede quedar "vacío" en pandas, y cuando el editor agrega una fila nueva
+        # para capturar, eso forzaba un cambio de tipo de dato que hacía que la
+        # tabla se re-dibujara completa y perdieras la selección a medio llenar.
         st.session_state.pedido_df = pd.DataFrame(
-            {"SKU": pd.Series(dtype="int"), "Cantidad (Kg)": pd.Series(dtype="float"),
+            {"SKU": pd.Series(dtype="float"), "Cantidad (Kg)": pd.Series(dtype="float"),
              "Precio de Venta ($/Kg)": pd.Series(dtype="float")}
         )
 
