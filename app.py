@@ -244,6 +244,32 @@ def buscar_inventario(termino):
         conn.close()
 
 
+def get_costo_referencia(sku):
+    """
+    Devuelve (costo, fuente_costo, nombre) para un SKU, usando esta prioridad:
+    1) Costo Vivo Ponderado (lo que hay en existencia ahora) si es > 0
+    2) Costo Ponderado Histórico (si no hay existencia pero sí historial)
+    3) Costo Lista (si no hay nada de GIIC)
+    Devuelve (None, None, None) si el SKU no existe en ningún lado.
+    """
+    conn = get_conn()
+    try:
+        info = _info_sku(conn, sku)
+    finally:
+        conn.close()
+
+    if info["Nombre"] == "" and info["Fuente"] == "Sin datos":
+        return None, None, None
+
+    if info["Costo Vivo Ponderado (Existencia)"]:
+        return info["Costo Vivo Ponderado (Existencia)"], "Vivo (Existencia)", info["Nombre"]
+    if info["Costo Ponderado Histórico"]:
+        return info["Costo Ponderado Histórico"], "Histórico", info["Nombre"]
+    if info["Costo Lista"]:
+        return info["Costo Lista"], "Lista", info["Nombre"]
+    return None, None, info["Nombre"]
+
+
 def contar_registros():
     conn = get_conn()
     try:
@@ -301,92 +327,152 @@ with st.sidebar:
             st.error("Clave incorrecta.")
         st.caption("Solo un administrador puede cargar archivos nuevos. Cualquiera puede buscar sin clave.")
 
-# --- Buscador (para todos, sin clave) ---
+# --- Pestañas: Buscador / Cotizador de Pedido ---
 n_lista, n_costos, n_exist = contar_registros()
 st.caption(f"Datos cargados: {n_lista} SKU en Lista de Costos · {n_costos} SKU con historial de costos · {n_exist} SKU con existencia actual")
 
-termino = st.text_input("🔎 Buscar SKU o descripción", placeholder="Ej. 2001 o Chamberete")
-resultados = buscar_inventario(termino)
+tab_buscar, tab_cotizador = st.tabs(["🔎 Buscador", "🧮 Cotizador de Pedido"])
 
-if resultados:
-    df = pd.DataFrame(resultados)
+with tab_buscar:
+    termino = st.text_input("Buscar SKU o descripción", placeholder="Ej. 2001 o Chamberete")
+    resultados = buscar_inventario(termino)
 
-    df_fmt = df.copy()
-    money_cols = ["Costo Ponderado Histórico", "Costo Vivo Ponderado (Existencia)", "Costo Lista",
-                  "Dif. $ (Vivo-Lista)", "Valor en Existencia", "Valor Total Histórico", "Costo Mín.", "Costo Máx."]
-    for c in money_cols:
-        df_fmt[c] = df_fmt[c].map(lambda v: f"${v:,.2f}" if pd.notna(v) else "")
-    df_fmt["Dif. %"] = df_fmt["Dif. %"].map(lambda v: f"{v*100:,.1f}%" if pd.notna(v) else "")
-    for c in ["Kilos en Existencia", "Kilos Histórico"]:
-        df_fmt[c] = df_fmt[c].map(lambda v: f"{v:,.2f}" if pd.notna(v) else "")
+    if resultados:
+        df = pd.DataFrame(resultados)
 
-    st.dataframe(df_fmt, use_container_width=True, hide_index=True)
-    st.caption(f"{len(resultados)} SKU encontrados.")
-else:
-    st.info("No se encontraron resultados. Prueba con otro SKU o descripción.")
+        df_fmt = df.copy()
+        money_cols = ["Costo Ponderado Histórico", "Costo Vivo Ponderado (Existencia)", "Costo Lista",
+                      "Dif. $ (Vivo-Lista)", "Valor en Existencia", "Valor Total Histórico", "Costo Mín.", "Costo Máx."]
+        for c in money_cols:
+            df_fmt[c] = df_fmt[c].map(lambda v: f"${v:,.2f}" if pd.notna(v) else "")
+        df_fmt["Dif. %"] = df_fmt["Dif. %"].map(lambda v: f"{v*100:,.1f}%" if pd.notna(v) else "")
+        for c in ["Kilos en Existencia", "Kilos Histórico"]:
+            df_fmt[c] = df_fmt[c].map(lambda v: f"{v:,.2f}" if pd.notna(v) else "")
 
+        st.dataframe(df_fmt, width='stretch', hide_index=True)
+        st.caption(f"{len(resultados)} SKU encontrados.")
+    else:
+        st.info("No se encontraron resultados. Prueba con otro SKU o descripción.")
 
-# --- Calculadora de margen de ganancia ---
-st.divider()
-st.subheader("🧮 Calculadora de margen de ganancia")
+with tab_cotizador:
+    st.markdown(
+        "Agrega los SKU del pedido, su cantidad y el precio al que los quieres vender. "
+        "El costo de referencia de cada SKU se toma automáticamente (primero el costo **vivo** de lo que "
+        "hay en existencia; si no hay existencia, el **histórico**; si no hay nada de GIIC, el de **Lista**)."
+    )
 
-col1, col2 = st.columns(2)
-with col1:
-    sku_margen = st.text_input("SKU", key="sku_margen", placeholder="Ej. 2001")
-with col2:
-    precio_venta = st.number_input("Precio al que se quiere vender ($)", min_value=0.0, step=0.5, format="%.2f")
+    if "pedido_df" not in st.session_state:
+        st.session_state.pedido_df = pd.DataFrame(
+            {"SKU": pd.Series(dtype="int"), "Cantidad (Kg)": pd.Series(dtype="float"),
+             "Precio de Venta ($/Kg)": pd.Series(dtype="float")}
+        )
 
-if sku_margen.strip():
-    try:
-        sku_int = int(float(sku_margen))
-        conn = get_conn()
-        try:
-            info = _info_sku(conn, sku_int)
-        finally:
-            conn.close()
+    pedido_editado = st.data_editor(
+        st.session_state.pedido_df,
+        num_rows="dynamic",
+        width='stretch',
+        key="editor_pedido",
+        column_config={
+            "SKU": st.column_config.NumberColumn(format="%d"),
+            "Cantidad (Kg)": st.column_config.NumberColumn(format="%.2f"),
+            "Precio de Venta ($/Kg)": st.column_config.NumberColumn(format="%.2f"),
+        },
+    )
+    st.session_state.pedido_df = pedido_editado
 
-        if info["Fuente"] == "Sin datos":
-            st.warning("Ese SKU no está en los datos cargados.")
-        else:
-            st.caption(f"**{info['Nombre']}**")
+    filas_validas = pedido_editado.dropna(subset=["SKU"])
+    filas_validas = filas_validas[filas_validas["SKU"] > 0]
 
-            filas = []
-            for etiqueta, costo in [
-                ("Costo de Lista", info["Costo Lista"]),
-                ("Costo Ponderado (Existencia actual)", info["Costo Vivo Ponderado (Existencia)"]),
-                ("Costo Ponderado Histórico", info["Costo Ponderado Histórico"]),
-            ]:
-                if costo and precio_venta > 0:
-                    ganancia = precio_venta - costo
-                    margen_venta = ganancia / precio_venta * 100      # % sobre el precio de venta
-                    margen_costo = ganancia / costo * 100             # % sobre el costo (markup)
-                    filas.append({
-                        "Referencia de Costo": etiqueta,
-                        "Costo": f"${costo:,.2f}",
-                        "Ganancia/Pérdida $": f"${ganancia:,.2f}",
-                        "Margen % (sobre venta)": f"{margen_venta:,.1f}%",
-                        "Margen % (sobre costo)": f"{margen_costo:,.1f}%",
-                    })
-                else:
-                    filas.append({
-                        "Referencia de Costo": etiqueta,
-                        "Costo": f"${costo:,.2f}" if costo else "Sin dato",
-                        "Ganancia/Pérdida $": "",
-                        "Margen % (sobre venta)": "",
-                        "Margen % (sobre costo)": "",
-                    })
+    if len(filas_validas) > 0:
+        calc_rows = []
+        for _, row in filas_validas.iterrows():
+            sku = int(row["SKU"])
+            cantidad = float(row["Cantidad (Kg)"]) if pd.notna(row["Cantidad (Kg)"]) else 0.0
+            precio = float(row["Precio de Venta ($/Kg)"]) if pd.notna(row["Precio de Venta ($/Kg)"]) else 0.0
 
-            st.dataframe(pd.DataFrame(filas), use_container_width=True, hide_index=True)
+            costo, fuente_costo, nombre = get_costo_referencia(sku)
 
-            if precio_venta <= 0:
-                st.info("Escribe un precio de venta arriba para calcular el margen.")
+            if costo is None:
+                calc_rows.append({
+                    "SKU": sku, "Nombre": "⚠️ No encontrado", "Costo Ref. ($/Kg)": None,
+                    "Fuente Costo": "—", "Cantidad (Kg)": cantidad, "Precio Venta ($/Kg)": precio,
+                    "Ganancia Unitaria ($/Kg)": None, "Margen %": None, "Ganancia Total ($)": None,
+                    "Venta Total ($)": precio * cantidad,
+                })
+                continue
+
+            ganancia_unit = precio - costo
+            margen_pct = (ganancia_unit / precio) if precio else None
+            ganancia_total = ganancia_unit * cantidad
+            venta_total = precio * cantidad
+
+            calc_rows.append({
+                "SKU": sku, "Nombre": nombre, "Costo Ref. ($/Kg)": costo, "Fuente Costo": fuente_costo,
+                "Cantidad (Kg)": cantidad, "Precio Venta ($/Kg)": precio,
+                "Ganancia Unitaria ($/Kg)": ganancia_unit, "Margen %": margen_pct,
+                "Ganancia Total ($)": ganancia_total, "Venta Total ($)": venta_total,
+            })
+
+        df_calc = pd.DataFrame(calc_rows)
+
+        st.subheader("Resultado por SKU")
+        df_calc_fmt = df_calc.copy()
+        for c in ["Costo Ref. ($/Kg)", "Precio Venta ($/Kg)", "Ganancia Unitaria ($/Kg)",
+                  "Ganancia Total ($)", "Venta Total ($)"]:
+            df_calc_fmt[c] = df_calc_fmt[c].map(lambda v: f"${v:,.2f}" if pd.notna(v) else "")
+        df_calc_fmt["Margen %"] = df_calc_fmt["Margen %"].map(lambda v: f"{v*100:,.1f}%" if pd.notna(v) else "")
+        st.dataframe(df_calc_fmt, width='stretch', hide_index=True)
+
+        venta_total_pedido = df_calc["Venta Total ($)"].sum()
+        ganancia_total_pedido = df_calc["Ganancia Total ($)"].dropna().sum()
+        costo_total_pedido = venta_total_pedido - ganancia_total_pedido
+        margen_total_pedido = (ganancia_total_pedido / venta_total_pedido) if venta_total_pedido else 0
+
+        if df_calc["Costo Ref. ($/Kg)"].isna().any():
+            st.warning("Algunos SKU no se encontraron en la base — revisa que estén bien escritos. No se incluyen en los totales de ganancia.")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Venta Total del Pedido", f"${venta_total_pedido:,.2f}")
+        c2.metric("Ganancia Total ($)", f"${ganancia_total_pedido:,.2f}")
+        c3.metric("Margen % del Pedido", f"{margen_total_pedido*100:,.1f}%")
+
+        st.divider()
+
+        # --- Prorrateo por margen objetivo ---
+        st.subheader("¿Cuánto cobrar para lograr un margen total específico?")
+        st.markdown(
+            "Pon el margen que quieres ganar en **todo el pedido** y te calculo el precio que le "
+            "correspondería a cada SKU para que, en conjunto, el pedido cierre exactamente en ese margen "
+            "(se aplica el mismo % de margen a cada SKU sobre su costo de referencia)."
+        )
+        margen_objetivo = st.number_input("Margen total objetivo (%)", min_value=0.0, max_value=95.0, value=20.0, step=1.0)
+
+        if st.button("Calcular precios sugeridos"):
+            filas_con_costo = df_calc[df_calc["Costo Ref. ($/Kg)"].notna()].copy()
+            if len(filas_con_costo) == 0:
+                st.error("No hay SKU con costo válido para calcular precios sugeridos.")
             else:
-                st.caption(
-                    "**Margen sobre venta** = ganancia ÷ precio de venta (lo que suele pedir un estado de resultados). "
-                    "**Margen sobre costo** = ganancia ÷ costo (cuánto se le sube al costo, o 'markup')."
+                m = margen_objetivo / 100.0
+                filas_con_costo["Precio Sugerido ($/Kg)"] = filas_con_costo["Costo Ref. ($/Kg)"] / (1 - m)
+                filas_con_costo["Ganancia Sugerida ($/Kg)"] = filas_con_costo["Precio Sugerido ($/Kg)"] - filas_con_costo["Costo Ref. ($/Kg)"]
+                filas_con_costo["Ganancia Total Sugerida ($)"] = filas_con_costo["Ganancia Sugerida ($/Kg)"] * filas_con_costo["Cantidad (Kg)"]
+                filas_con_costo["Venta Total Sugerida ($)"] = filas_con_costo["Precio Sugerido ($/Kg)"] * filas_con_costo["Cantidad (Kg)"]
+
+                out = filas_con_costo[["SKU", "Nombre", "Costo Ref. ($/Kg)", "Cantidad (Kg)",
+                                        "Precio Sugerido ($/Kg)", "Ganancia Total Sugerida ($)", "Venta Total Sugerida ($)"]].copy()
+                out_fmt = out.copy()
+                for c in ["Costo Ref. ($/Kg)", "Precio Sugerido ($/Kg)", "Ganancia Total Sugerida ($)", "Venta Total Sugerida ($)"]:
+                    out_fmt[c] = out_fmt[c].map(lambda v: f"${v:,.2f}")
+                st.dataframe(out_fmt, width='stretch', hide_index=True)
+
+                venta_sug = out["Venta Total Sugerida ($)"].sum()
+                ganancia_sug = out["Ganancia Total Sugerida ($)"].sum()
+                st.success(
+                    f"Con estos precios, el pedido vendería **${venta_sug:,.2f}**, ganarías "
+                    f"**${ganancia_sug:,.2f}**, exactamente **{margen_objetivo:,.1f}%** de margen total."
                 )
-    except ValueError:
-        st.warning("Escribe un SKU válido (solo números).")
+    else:
+        st.info("Agrega al menos un SKU en la tabla de arriba (clic en el + al final de la tabla) para ver el cálculo.")
 
 
 # ====================================================================
