@@ -384,10 +384,15 @@ with tab_cotizador:
     )
     st.session_state.pedido_df = pedido_editado
 
-    filas_validas = pedido_editado.dropna(subset=["SKU"])
-    filas_validas = filas_validas[filas_validas["SKU"] > 0]
+    # El cálculo solo corre cuando le das clic al botón — así puedes llenar/editar
+    # la tabla completa (Enter, Tab, clic en otra celda, agregar filas) sin que la
+    # parte de abajo se recalcule y redibuje en cada movimiento.
+    calcular = st.button("📊 Calcular pedido", type="primary")
 
-    if len(filas_validas) > 0:
+    if calcular:
+        filas_validas = pedido_editado.dropna(subset=["SKU"])
+        filas_validas = filas_validas[filas_validas["SKU"] > 0]
+
         calc_rows = []
         for _, row in filas_validas.iterrows():
             sku = int(row["SKU"])
@@ -417,8 +422,15 @@ with tab_cotizador:
                 "Ganancia Total ($)": ganancia_total, "Venta Total ($)": venta_total,
             })
 
-        df_calc = pd.DataFrame(calc_rows)
+        if calc_rows:
+            st.session_state.df_calc_pedido = pd.DataFrame(calc_rows)
+        else:
+            st.session_state.df_calc_pedido = None
+            st.warning("Agrega al menos un SKU con cantidad y precio antes de calcular.")
 
+    df_calc = st.session_state.get("df_calc_pedido")
+
+    if df_calc is not None and len(df_calc) > 0:
         st.subheader("Resultado por SKU")
         df_calc_fmt = df_calc.copy()
         for c in ["Costo Ref. ($/Kg)", "Precio Venta ($/Kg)", "Ganancia Unitaria ($/Kg)",
@@ -475,8 +487,8 @@ with tab_cotizador:
                     f"Con estos precios, el pedido vendería **${venta_sug:,.2f}**, ganarías "
                     f"**${ganancia_sug:,.2f}**, exactamente **{margen_objetivo:,.1f}%** de margen total."
                 )
-    else:
-        st.info("Agrega al menos un SKU en la tabla de arriba (clic en el + al final de la tabla) para ver el cálculo.")
+    elif not calcular:
+        st.info("Llena la tabla de arriba (SKU, Cantidad, Precio) y dale clic a \"📊 Calcular pedido\" para ver el resultado.")
 
 
 # ====================================================================
